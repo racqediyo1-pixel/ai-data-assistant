@@ -1,38 +1,76 @@
+import sqlparse
 import re
 
-def extract_table_and_columns(sql: str):
+
+def extract_tables_from_sql(sql: str):
     """
-    Very simple SQL parser for SELECT queries.
+    Extract table names from FROM and JOIN clauses using regex.
     """
-    table_match = re.search(r"FROM\s+(\w+)", sql, re.IGNORECASE)
-    columns_match = re.search(r"SELECT\s+(.*?)\s+FROM", sql, re.IGNORECASE)
+    sql = sql.lower()
 
-    table = table_match.group(1) if table_match else None
-    columns_raw = columns_match.group(1) if columns_match else None
+    tables = []
+    tables += re.findall(r'from\s+([a-zA-Z_][a-zA-Z0-9_]*)', sql)
+    tables += re.findall(r'join\s+([a-zA-Z_][a-zA-Z0-9_]*)', sql)
 
-    if columns_raw == "*":
-        columns = ["*"]
-    else:
-        columns = [c.strip() for c in columns_raw.split(",")]
+    return list(set(tables))  # unique tables
 
-    return table, columns
+
+def extract_columns_from_sql(sql: str):
+    """
+    Extract column names from SELECT clause using sqlparse.
+    """
+    parsed = sqlparse.parse(sql)[0]
+    columns = []
+
+    for token in parsed.tokens:
+        # Identifier or IdentifierList are usually inside token groups
+        if token.ttype is None and hasattr(token, "tokens"):
+            for subtoken in token.tokens:
+                if subtoken.ttype is None:
+                    value = str(subtoken).strip()
+                    if value:
+                        columns.append(value)
+
+    return columns
 
 
 def validate_sql_against_schema(sql: str, schema: dict):
-    table, columns = extract_table_and_columns(sql)
+    """
+    Validate generated SQL against DB schema.
+    """
 
-    if not table:
-        return False, "No table found in SQL."
+    # 1️⃣ Allow only SELECT queries
+    if not sql.strip().lower().startswith("select"):
+        return False, "Only SELECT queries are allowed"
 
-    if table not in schema:
-        return False, f"Table '{table}' does not exist."
+    # 2️⃣ Extract tables
+    tables_used = extract_tables_from_sql(sql)
 
-    if columns != ["*"]:
-        for col in columns:
-            if col not in schema[table]:
-                return False, f"Column '{col}' does not exist in table '{table}'."
+    if not tables_used:
+        return False, "No table detected in SQL"
 
+    # 3️⃣ Validate tables exist
+    for table in tables_used:
+        if table not in schema:
+            return False, f"Table '{table}' does not exist in schema"
+
+    # 4️⃣ Extract columns
+    columns_used = extract_columns_from_sql(sql)
+
+    # 5️⃣ Validate columns (basic, safe rules)
+    for col in columns_used:
+        col_lower = col.lower()
+
+        # Allow wildcards and aggregates
+        if col == "*" or "count" in col_lower or "sum" in col_lower or "avg" in col_lower:
+            continue
+
+        # Column must exist in at least one referenced table
+        if not any(col in schema[table] for table in tables_used):
+            return False, f"Column '{col}' does not exist in referenced tables"
+
+    # 6️⃣ Success
     return True, {
-        "table": table,
-        "columns": columns
+        "tables": tables_used,
+        "columns": columns_used
     }
